@@ -94,7 +94,7 @@ impl BlockParser for MetaParser {
             reader.advance_to_eol();
             return None;
         }
-        as_type_data_mut!(arena, node_ref, Block).append_line(seg);
+        as_type_data_mut!(arena, node_ref, Block).append_source_line(seg);
         Some(parser::State::NO_CHILDREN)
     }
 
@@ -145,7 +145,7 @@ impl AstTransformer for MetaAstTransformer {
         };
         let mut yaml_data = String::new();
 
-        for line in as_type_data!(arena, *meta_ref, Block).lines() {
+        for line in as_type_data!(arena, *meta_ref, Block).source() {
             yaml_data.push_str(&line.str(reader.source()));
         }
         meta_ref.delete(arena);
