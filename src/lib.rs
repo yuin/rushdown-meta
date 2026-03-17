@@ -11,6 +11,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::result::Result as CoreResult;
+use rushdown::ast::HtmlBlock;
 use rushdown::ast::Table;
 use rushdown::ast::TableBody;
 use rushdown::ast::TableCell;
@@ -165,7 +166,7 @@ impl AstTransformer for MetaAstTransformer {
                         for (key, _) in m.iter() {
                             let cell_ref = arena.new_node(TableCell::default());
                             let text_ref = arena
-                                .new_node(Text::with_qualifiers(key.clone(), TextQualifier::CODE));
+                                .new_node(Text::with_qualifiers(key.clone(), TextQualifier::RAW));
                             cell_ref.append_child(arena, text_ref);
                             header_row_ref.append_child(arena, cell_ref);
                         }
@@ -189,9 +190,9 @@ impl AstTransformer for MetaAstTransformer {
                         }
                     }
                 } else {
-                    let error_msg = "<!-- YAML metadata must be a mapping -->\n".to_string();
-                    let error_ref =
-                        arena.new_node(Text::with_qualifiers(error_msg, TextQualifier::CODE));
+                    let mut error_data = HtmlBlock::new(rushdown::ast::HtmlBlockType::Type2);
+                    error_data.set_value("<!-- YAML metadata must be a mapping -->\n".to_string());
+                    let error_ref = arena.new_node(error_data);
                     if let Some(first) = arena[doc_ref].first_child() {
                         doc_ref.insert_before(arena, first, error_ref);
                     } else {
@@ -200,9 +201,11 @@ impl AstTransformer for MetaAstTransformer {
                 }
             }
             Err(e) => {
-                let error_msg = format!("<!-- Error parsing YAML metadata: {} -->\n", e);
-                let error_ref =
-                    arena.new_node(Text::with_qualifiers(error_msg, TextQualifier::CODE));
+                let mut error_data = HtmlBlock::new(rushdown::ast::HtmlBlockType::Type2);
+                error_data.set_value(
+                    format!("<!-- Error parsing YAML metadata: {} -->\n", e).to_string(),
+                );
+                let error_ref = arena.new_node(error_data);
                 if let Some(first) = arena[doc_ref].first_child() {
                     doc_ref.insert_before(arena, first, error_ref);
                 } else {
@@ -245,33 +248,16 @@ fn format_meta(meta: &Meta) -> String {
 // Extension {{{
 
 /// Returns a parser extension that parses metas.
-pub fn meta_parser_extension(options: MetaParserOptions) -> impl ParserExtension {
+pub fn meta_parser_extension(options: impl Into<MetaParserOptions>) -> impl ParserExtension {
     ParserExtensionFn::new(|p: &mut Parser| {
         p.add_block_parser(
             MetaParser::new,
             NoParserOptions,
             PRIORITY_SETTEXT_HEADING - 100,
         );
-        p.add_ast_transformer(MetaAstTransformer::new, options, 0);
+        p.add_ast_transformer(MetaAstTransformer::new, options.into(), 0);
     })
 }
-
-/*
-/// Returns a renderer extension that renders metas in HTML.
-pub fn meta_html_renderer_extension<'cb, W>(
-    options: impl Into<FootnoteHtmlRendererOptions>,
-) -> impl RendererExtension<'cb, W>
-where
-    W: TextWrite + 'cb,
-{
-    RendererExtensionFn::new(move |r: &mut Renderer<'cb, W>| {
-        let options = options.into();
-        r.add_post_render_hook(FootnotePostRenderHook::new, options.clone(), 500);
-        r.add_node_renderer(FootnoteDefinitionHtmlRenderer::new, options.clone());
-        r.add_node_renderer(FootnoteReferenceHtmlRenderer::new, options);
-    })
-}
-*/
 
 // }}}
 

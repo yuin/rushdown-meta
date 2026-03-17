@@ -85,10 +85,9 @@ aaa
     );
     MarkdownTestCase::new(
         1,
-        String::from("ok"),
-        String::from(source),
-        String::from(
-            r#"<table>
+        "ok",
+        source,
+        r#"<table>
 <thead>
 <tr>
 <th>title</th>
@@ -108,7 +107,6 @@ aaa
 </table>
 <p>aaa</p>
 "#,
-        ),
         MarkdownTestCaseOptions::default(),
     )
     .execute(&markdown_to_html);
@@ -134,11 +132,11 @@ aaa
     );
     MarkdownTestCase::new(
         1,
-        String::from("ok"),
-        String::from(source),
-        String::from(r#"<!-- Error parsing YAML metadata: YAML parsing error: Terminate { name: "map splitter", msg: "2:9\nhogehoge\n        ^" } -->
+        "ok",
+        source,
+        r#"<!-- Error parsing YAML metadata: YAML parsing error: Terminate { name: "map splitter", msg: "2:9\nhogehoge\n        ^" } -->
 <p>aaa</p>
-"#),
+"#,
         MarkdownTestCaseOptions::default(),
     )
     .execute(&markdown_to_html);
