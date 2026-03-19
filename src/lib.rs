@@ -21,7 +21,7 @@ use rushdown::parser::ParserOptions;
 
 use rushdown::{
     as_kind_data_mut, as_type_data, as_type_data_mut,
-    ast::{Arena, CodeBlock, CodeBlockType, Meta, NodeRef, Text, TextQualifier},
+    ast::{Arena, CodeBlock, CodeBlockKind, Meta, NodeRef, Text, TextQualifier},
     context::{ContextKey, ContextKeyRegistry, NodeRefValue},
     parser::{
         self, AnyAstTransformer, AnyBlockParser, AstTransformer, BlockParser, NoParserOptions,
@@ -78,7 +78,7 @@ impl BlockParser for MetaParser {
             return None;
         }
         reader.advance_to_eol();
-        let node_ref = arena.new_node(CodeBlock::new(CodeBlockType::Fenced, None));
+        let node_ref = arena.new_node(CodeBlock::new(CodeBlockKind::Fenced, None));
         ctx.insert(self.meta_node, node_ref);
         Some((node_ref, parser::State::NO_CHILDREN))
     }
@@ -190,7 +190,7 @@ impl AstTransformer for MetaAstTransformer {
                         }
                     }
                 } else {
-                    let mut error_data = HtmlBlock::new(rushdown::ast::HtmlBlockType::Type2);
+                    let mut error_data = HtmlBlock::new(rushdown::ast::HtmlBlockKind::Kind2);
                     error_data.set_value("<!-- YAML metadata must be a mapping -->\n".to_string());
                     let error_ref = arena.new_node(error_data);
                     if let Some(first) = arena[doc_ref].first_child() {
@@ -201,7 +201,7 @@ impl AstTransformer for MetaAstTransformer {
                 }
             }
             Err(e) => {
-                let mut error_data = HtmlBlock::new(rushdown::ast::HtmlBlockType::Type2);
+                let mut error_data = HtmlBlock::new(rushdown::ast::HtmlBlockKind::Kind2);
                 error_data.set_value(
                     format!("<!-- Error parsing YAML metadata: {} -->\n", e).to_string(),
                 );

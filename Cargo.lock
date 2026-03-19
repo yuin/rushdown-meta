@@ -177,9 +177,9 @@ dependencies = [
 
 [[package]]
 name = "rushdown"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ffb6c1baf3cb92f37fd57cd144488d0035cfd88ee6bb6d9fd9ecfe798a8540a"
+checksum = "86cc8984b876137fd075aee278a43699bdcbefccc4b9fa6c1410d327471c660f"
 dependencies = [
  "bitflags",
  "hashbrown 0.15.5",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "rushdown-meta"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "rushdown",
  "yaml-peg",
