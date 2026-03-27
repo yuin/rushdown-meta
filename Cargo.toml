@@ -1,6 +1,6 @@
 [package]
 name = "rushdown-meta"
-version = "0.9.5"
+version = "0.9.6"
 edition = "2021"
 rust-version = "1.87"
 description = "Meta(YAML frontmatter) extension for rushdown markdown parser"
@@ -28,5 +28,5 @@ alloc = []
 no-std = ["alloc", "rushdown/no-std"]
 
 [dependencies]
-rushdown = { version = "0.13.0", default-features = false}
+rushdown = { version = "0.14.0", default-features = false}
 yaml-peg = "1.0.9"

@@ -21,7 +21,7 @@ use rushdown::parser::ParserOptions;
 
 use rushdown::{
     as_kind_data_mut, as_type_data, as_type_data_mut,
-    ast::{Arena, CodeBlock, CodeBlockKind, Meta, NodeRef, Text, TextQualifier},
+    ast::{Arena, CodeBlock, CodeBlockKind, Meta, NodeRef, Text},
     context::{ContextKey, ContextKeyRegistry, NodeRefValue},
     parser::{
         self, AnyAstTransformer, AnyBlockParser, AstTransformer, BlockParser, NoParserOptions,
@@ -165,8 +165,7 @@ impl AstTransformer for MetaAstTransformer {
                         let header_row_ref = arena.new_node(TableRow::new());
                         for (key, _) in m.iter() {
                             let cell_ref = arena.new_node(TableCell::default());
-                            let text_ref = arena
-                                .new_node(Text::with_qualifiers(key.clone(), TextQualifier::RAW));
+                            let text_ref = arena.new_node(Text::new(key.clone()));
                             cell_ref.append_child(arena, text_ref);
                             header_row_ref.append_child(arena, cell_ref);
                         }
