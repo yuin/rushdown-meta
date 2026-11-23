@@ -5,55 +5,119 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::rc::Rc;
-use alloc::string::String;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::any::TypeId;
+use core::fmt;
+use core::fmt::Write;
+use core::marker::PhantomData;
 use core::result::Result as CoreResult;
-use rushdown::ast::HtmlBlock;
-use rushdown::ast::Table;
-use rushdown::ast::TableBody;
-use rushdown::ast::TableCell;
-use rushdown::ast::TableHeader;
-use rushdown::ast::TableRow;
-use rushdown::parser::ParserOptions;
 
 use rushdown::{
-    as_kind_data_mut, as_type_data, as_type_data_mut,
-    ast::{Arena, CodeBlock, CodeBlockKind, Meta, NodeRef, Text},
-    context::{ContextKey, ContextKeyRegistry, NodeRefValue},
+    as_extension_data, as_extension_data_mut, as_kind_data_mut,
+    ast::{
+        pp_indent, Arena, InlineChars, KindData, Meta, NodeKind, NodeRef, NodeType, PrettyPrint,
+        WalkStatus,
+    },
     parser::{
-        self, AnyAstTransformer, AnyBlockParser, AstTransformer, BlockParser, NoParserOptions,
-        Parser, ParserExtension, ParserExtensionFn, PRIORITY_SETTEXT_HEADING,
+        self, AnyBlockParser, BlockParser, NoParserOptions, Parser, ParserExtension,
+        ParserExtensionFn,
+    },
+    renderer::{
+        self,
+        html::{self, renderer_extension, RendererExtension},
+        BoxRenderNode, NodeRenderer, NodeRendererRegistry, RenderNode, RendererOptions, TextWrite,
     },
     text::{self, Reader},
-    util::StringMap,
+    util::{self, is_blank, StringMap},
+    Result,
 };
+
+// AST {{{
+
+/// A struct representing a meta(YAML frontmatter) block in the AST.
+#[derive(Debug)]
+pub struct MetaBlock {
+    value: Vec<text::Segment>,
+    meta: Meta,
+    error: Option<String>,
+}
+
+impl MetaBlock {
+    fn new() -> Self {
+        Self {
+            value: Vec::new(),
+            meta: Meta::Null,
+            error: None,
+        }
+    }
+
+    /// Returns the raw source lines of this block.
+    #[inline(always)]
+    pub fn value(&self) -> &[text::Segment] {
+        &self.value
+    }
+
+    /// Returns the metadata parsed from this block.
+    ///
+    /// Returns `Meta::Null` if the block could not be parsed.
+    #[inline(always)]
+    pub fn meta(&self) -> &Meta {
+        &self.meta
+    }
+
+    /// Returns the error message if this block could not be parsed.
+    #[inline(always)]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+impl InlineChars for MetaBlock {}
+
+impl NodeKind for MetaBlock {
+    fn typ(&self) -> NodeType {
+        NodeType::LeafBlock
+    }
+
+    fn kind_name(&self) -> &'static str {
+        "MetaBlock"
+    }
+}
+
+impl PrettyPrint for MetaBlock {
+    fn pretty_print(&self, w: &mut dyn Write, source: &str, level: usize) -> fmt::Result {
+        writeln!(w, "{}Value:", pp_indent(level))?;
+        for segment in self.value() {
+            writeln!(w, "{}  {}", pp_indent(level), segment.str(source))?;
+        }
+        writeln!(w, "{}Meta: {:?}", pp_indent(level), self.meta())
+    }
+}
+
+impl From<MetaBlock> for KindData {
+    fn from(e: MetaBlock) -> Self {
+        KindData::Extension(Box::new(e))
+    }
+}
+
+// }}}
 
 // Parser {{{
 
-const META_NODE: &str = "rushdown-meta-n";
-
-/// Options for the meta parser.
-#[derive(Debug, Clone, Default)]
-pub struct MetaParserOptions {
-    /// Convert the meta data to a table node.
-    pub table: bool,
+/// Returns true if the given line consists of only `-` and spaces.
+fn is_separator(line: &[u8]) -> bool {
+    util::trim_right_space(util::trim_left_space(line))
+        .iter()
+        .all(|b| *b == b'-')
 }
 
-impl ParserOptions for MetaParserOptions {}
-
-#[derive(Debug)]
-struct MetaParser {
-    meta_node: ContextKey<NodeRefValue>,
-}
+#[derive(Debug, Default)]
+struct MetaParser {}
 
 impl MetaParser {
-    /// Returns a new [`MetaParser`].
-    pub fn new(reg: Rc<RefCell<ContextKeyRegistry>>) -> Self {
-        let meta_node = reg.borrow_mut().get_or_create::<NodeRefValue>(META_NODE);
-        Self { meta_node }
+    fn new() -> Self {
+        Self {}
     }
 }
 
@@ -67,20 +131,18 @@ impl BlockParser for MetaParser {
         arena: &mut Arena,
         _parent_ref: NodeRef,
         reader: &mut text::BasicReader,
-        ctx: &mut parser::Context,
+        _ctx: &mut parser::Context,
     ) -> Option<(NodeRef, parser::State)> {
         let (line, _) = reader.position();
         if line != 0 {
             return None;
         }
         let (line, _) = reader.peek_line_bytes()?;
-        if !line.starts_with(b"---") {
+        if !is_separator(&line) {
             return None;
         }
         reader.advance_to_eol();
-        let node_ref = arena.new_node(CodeBlock::new(CodeBlockKind::Fenced, None));
-        ctx.insert(self.meta_node, node_ref);
-        Some((node_ref, parser::State::NO_CHILDREN))
+        Some((arena.new_node(MetaBlock::new()), parser::State::NO_CHILDREN))
     }
 
     fn cont(
@@ -90,26 +152,51 @@ impl BlockParser for MetaParser {
         reader: &mut text::BasicReader,
         _ctx: &mut parser::Context,
     ) -> Option<parser::State> {
-        let (line, seg) = reader.peek_line_bytes()?;
-        if line.starts_with(b"---") {
+        let (line, segment) = reader.peek_line_bytes()?;
+        if !is_blank(&line) && is_separator(&line) {
             reader.advance_to_eol();
             return None;
         }
-        as_type_data_mut!(arena, node_ref, Block).append_source_line(seg);
+        as_extension_data_mut!(arena, node_ref, MetaBlock)
+            .value
+            .push(segment);
         Some(parser::State::NO_CHILDREN)
     }
 
     fn close(
         &self,
-        _arena: &mut Arena,
-        _node_ref: NodeRef,
-        _reader: &mut text::BasicReader,
+        arena: &mut Arena,
+        node_ref: NodeRef,
+        reader: &mut text::BasicReader,
         _ctx: &mut parser::Context,
     ) {
+        let source = reader.source();
+        let yaml = {
+            let mut buf = String::new();
+            for segment in as_extension_data!(arena, node_ref, MetaBlock).value() {
+                buf.push_str(&segment.str(source));
+            }
+            buf
+        };
+        let (meta, error) = match parse_yaml(&yaml) {
+            Ok(meta) => (meta, None),
+            Err(e) => (Meta::Null, Some(e)),
+        };
+        if let Some(doc_ref) = arena[node_ref].owner_document(arena) {
+            if let Meta::Mapping(map) = &meta {
+                let metadata = as_kind_data_mut!(arena, doc_ref, Document).metadata_mut();
+                for (key, value) in map.iter() {
+                    metadata.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        let data = as_extension_data_mut!(arena, node_ref, MetaBlock);
+        data.meta = meta;
+        data.error = error;
     }
 
     fn can_interrupt_paragraph(&self) -> bool {
-        true
+        false
     }
 }
 
@@ -119,126 +206,156 @@ impl From<MetaParser> for AnyBlockParser {
     }
 }
 
-#[derive(Debug)]
-struct MetaAstTransformer {
-    meta_node: ContextKey<NodeRefValue>,
-    options: MetaParserOptions,
+// }}}
+
+// Renderer {{{
+
+/// A layout of the meta table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MetaTableLayout {
+    /// Renders keys as table columns.
+    #[default]
+    Columns,
+    /// Renders keys as table rows.
+    Rows,
 }
 
-impl MetaAstTransformer {
-    /// Returns a new [`MetaAstTransformer`].
-    pub fn new(reg: Rc<RefCell<ContextKeyRegistry>>, options: MetaParserOptions) -> Self {
-        let meta_node = reg.borrow_mut().get_or_create::<NodeRefValue>(META_NODE);
-        Self { meta_node, options }
+/// Options for the meta HTML renderer.
+#[derive(Debug, Clone, Default)]
+pub struct MetaHtmlRendererOptions {
+    /// Renders parsed metadata as an HTML table before the document body.
+    pub table: Option<MetaTableLayout>,
+}
+
+impl MetaHtmlRendererOptions {
+    /// Returns options that render the meta table with the given layout.
+    pub fn with_table(layout: MetaTableLayout) -> Self {
+        Self {
+            table: Some(layout),
+        }
     }
 }
 
-impl AstTransformer for MetaAstTransformer {
-    fn transform(
+impl RendererOptions for MetaHtmlRendererOptions {}
+
+struct MetaBlockHtmlRenderer<W: TextWrite> {
+    _phantom: PhantomData<W>,
+    options: MetaHtmlRendererOptions,
+}
+
+impl<W: TextWrite> MetaBlockHtmlRenderer<W> {
+    fn new(options: MetaHtmlRendererOptions) -> Self {
+        Self {
+            _phantom: PhantomData,
+            options,
+        }
+    }
+
+    fn render_table(w: &mut W, map: &StringMap<Meta>, layout: MetaTableLayout) -> Result<()> {
+        match layout {
+            MetaTableLayout::Columns => {
+                w.write_str("<table>\n<thead>\n<tr>\n")?;
+                for (key, _) in map.iter() {
+                    w.write_str("<th>")?;
+                    html::write_text(w, key)?;
+                    w.write_str("</th>\n")?;
+                }
+                w.write_str("</tr>\n</thead>\n<tbody>\n<tr>\n")?;
+                for (_, value) in map.iter() {
+                    w.write_str("<td>")?;
+                    render_meta_value(w, value)?;
+                    w.write_str("</td>\n")?;
+                }
+                w.write_str("</tr>\n</tbody>\n</table>\n")
+            }
+            MetaTableLayout::Rows => {
+                w.write_str("<table>\n<tbody>\n")?;
+                for (key, value) in map.iter() {
+                    w.write_str("<tr>\n<td>")?;
+                    html::write_text(w, key)?;
+                    w.write_str("</td>\n<td>")?;
+                    render_meta_value(w, value)?;
+                    w.write_str("</td>\n</tr>\n")?;
+                }
+                w.write_str("</tbody>\n</table>\n")
+            }
+        }
+    }
+}
+
+impl<W: TextWrite> RenderNode<W> for MetaBlockHtmlRenderer<W> {
+    fn render_node<'a>(
         &self,
-        arena: &mut Arena,
-        doc_ref: NodeRef,
-        reader: &mut text::BasicReader,
-        ctx: &mut parser::Context,
-    ) {
-        let Some(meta_ref) = ctx.get(self.meta_node) else {
-            return;
+        w: &mut W,
+        _source: &'a str,
+        arena: &'a Arena,
+        node_ref: NodeRef,
+        entering: bool,
+        _context: &mut renderer::Context,
+    ) -> Result<WalkStatus> {
+        if !entering {
+            return Ok(WalkStatus::SkipChildren);
+        }
+        let data = as_extension_data!(arena, node_ref, MetaBlock);
+        if let Some(error) = data.error() {
+            w.write_str("<!-- ")?;
+            w.write_str(error)?;
+            w.write_str(" -->\n")?;
+            return Ok(WalkStatus::SkipChildren);
+        }
+        let Some(layout) = self.options.table else {
+            return Ok(WalkStatus::SkipChildren);
         };
-        let mut yaml_data = String::new();
-
-        for line in as_type_data!(arena, *meta_ref, Block).source() {
-            yaml_data.push_str(&line.str(reader.source()));
-        }
-        meta_ref.delete(arena);
-        match parse_yaml(&yaml_data) {
-            Ok(meta) => {
-                if let Meta::Mapping(map) = meta {
-                    let m = map.clone();
-                    for (key, value) in map {
-                        as_kind_data_mut!(arena, doc_ref, Document)
-                            .metadata_mut()
-                            .insert(key, value);
-                    }
-                    if self.options.table {
-                        let table_ref = arena.new_node(Table::new());
-                        let header_ref = arena.new_node(TableHeader::new());
-                        let header_row_ref = arena.new_node(TableRow::new());
-                        for (key, _) in m.iter() {
-                            let cell_ref = arena.new_node(TableCell::default());
-                            let text_ref = arena.new_node(Text::new(key.clone()));
-                            cell_ref.append_child(arena, text_ref);
-                            header_row_ref.append_child(arena, cell_ref);
-                        }
-                        header_ref.append_child(arena, header_row_ref);
-                        table_ref.append_child(arena, header_ref);
-
-                        let body_ref = arena.new_node(TableBody::new());
-                        table_ref.append_child(arena, body_ref);
-                        let body_row_ref = arena.new_node(TableRow::new());
-                        for (_, value) in m {
-                            let cell_ref = arena.new_node(TableCell::default());
-                            let text_ref = arena.new_node(Text::new(format_meta(&value)));
-                            cell_ref.append_child(arena, text_ref);
-                            body_row_ref.append_child(arena, cell_ref);
-                        }
-                        body_ref.append_child(arena, body_row_ref);
-                        if let Some(first) = arena[doc_ref].first_child() {
-                            doc_ref.insert_before(arena, first, table_ref);
-                        } else {
-                            doc_ref.append_child(arena, table_ref);
-                        }
-                    }
-                } else {
-                    let mut error_data = HtmlBlock::new(rushdown::ast::HtmlBlockKind::Kind2);
-                    error_data.set_value("<!-- YAML metadata must be a mapping -->\n".to_string());
-                    let error_ref = arena.new_node(error_data);
-                    if let Some(first) = arena[doc_ref].first_child() {
-                        doc_ref.insert_before(arena, first, error_ref);
-                    } else {
-                        doc_ref.append_child(arena, error_ref);
-                    }
-                }
-            }
-            Err(e) => {
-                let mut error_data = HtmlBlock::new(rushdown::ast::HtmlBlockKind::Kind2);
-                error_data.set_value(
-                    format!("<!-- Error parsing YAML metadata: {} -->\n", e).to_string(),
-                );
-                let error_ref = arena.new_node(error_data);
-                if let Some(first) = arena[doc_ref].first_child() {
-                    doc_ref.insert_before(arena, first, error_ref);
-                } else {
-                    doc_ref.append_child(arena, error_ref);
-                }
-            }
-        }
+        let Meta::Mapping(map) = data.meta() else {
+            return Ok(WalkStatus::SkipChildren);
+        };
+        Self::render_table(w, map, layout)?;
+        Ok(WalkStatus::SkipChildren)
     }
 }
 
-impl From<MetaAstTransformer> for AnyAstTransformer {
-    fn from(t: MetaAstTransformer) -> Self {
-        AnyAstTransformer::Extension(Box::new(t))
+impl<'cb, W> NodeRenderer<'cb, W> for MetaBlockHtmlRenderer<W>
+where
+    W: TextWrite + 'cb,
+{
+    fn register_node_renderer_fn(self, nrr: &mut impl NodeRendererRegistry<'cb, W>) {
+        nrr.register_node_renderer_fn(TypeId::of::<MetaBlock>(), BoxRenderNode::new(self));
     }
 }
 
-fn format_meta(meta: &Meta) -> String {
+fn format_scalar(meta: &Meta) -> String {
     match meta {
-        Meta::Null => "null".to_string(),
         Meta::Bool(b) => b.to_string(),
         Meta::Int(i) => i.to_string(),
         Meta::Float(f) => f.to_string(),
         Meta::String(s) => s.clone(),
-        Meta::Sequence(seq) => {
-            let items: Vec<String> = seq.iter().map(format_meta).collect();
-            format!("[{}]", items.join(", "))
+        _ => "null".to_string(),
+    }
+}
+
+fn render_meta_value<W: TextWrite + ?Sized>(w: &mut W, meta: &Meta) -> Result<()> {
+    match meta {
+        Meta::Sequence(items) => {
+            w.write_str("<ul>")?;
+            for item in items {
+                w.write_str("<li>")?;
+                render_meta_value(w, item)?;
+                w.write_str("</li>")?;
+            }
+            w.write_str("</ul>")
         }
         Meta::Mapping(map) => {
-            let items: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, format_meta(v)))
-                .collect();
-            format!("{{{}}}", items.join(", "))
+            w.write_str("<ul>")?;
+            for (key, value) in map.iter() {
+                w.write_str("<li>")?;
+                html::write_text(w, key)?;
+                w.write_str(": ")?;
+                render_meta_value(w, value)?;
+                w.write_str("</li>")?;
+            }
+            w.write_str("</ul>")
         }
+        _ => html::write_text(w, &format_scalar(meta)),
     }
 }
 
@@ -246,15 +363,23 @@ fn format_meta(meta: &Meta) -> String {
 
 // Extension {{{
 
-/// Returns a parser extension that parses metas.
-pub fn meta_parser_extension(options: impl Into<MetaParserOptions>) -> impl ParserExtension {
+/// Returns a parser extension that parses meta(YAML frontmatter) blocks.
+pub fn meta_parser_extension() -> impl ParserExtension {
     ParserExtensionFn::new(|p: &mut Parser| {
-        p.add_block_parser(
-            MetaParser::new,
-            NoParserOptions,
-            PRIORITY_SETTEXT_HEADING - 100,
-        );
-        p.add_ast_transformer(MetaAstTransformer::new, options.into(), 0);
+        p.add_block_parser(MetaParser::new, NoParserOptions, 0);
+    })
+}
+
+/// Returns a renderer extension that renders meta blocks as HTML.
+pub fn meta_html_renderer_extension<'cb, W>(
+    options: impl Into<MetaHtmlRendererOptions>,
+) -> impl RendererExtension<'cb, W>
+where
+    W: TextWrite + 'cb,
+{
+    let options = options.into();
+    renderer_extension(move |r| {
+        r.add_node_renderer(MetaBlockHtmlRenderer::new, options);
     })
 }
 
@@ -269,7 +394,7 @@ fn to_meta<R: yaml_peg::repr::Repr>(node: &yaml_peg::Node<R>) -> Meta {
         yaml_peg::Yaml::Int(s) => Meta::Int(s.parse().unwrap_or(0)),
         yaml_peg::Yaml::Float(s) => Meta::Float(s.parse().unwrap_or(0.0)),
         yaml_peg::Yaml::Str(s) => Meta::String(s.clone()),
-        yaml_peg::Yaml::Seq(seq) => Meta::Sequence(seq.iter().map(|n| to_meta(n)).collect()),
+        yaml_peg::Yaml::Seq(seq) => Meta::Sequence(seq.iter().map(to_meta).collect()),
         yaml_peg::Yaml::Map(map) => {
             let mut result = StringMap::with_capacity(map.len());
             for (k, v) in map.iter() {
@@ -279,18 +404,21 @@ fn to_meta<R: yaml_peg::repr::Repr>(node: &yaml_peg::Node<R>) -> Meta {
             }
             Meta::Mapping(result)
         }
-        yaml_peg::Yaml::Alias(_) => Meta::Null, // Aliases are not supported in this
-                                                // implementation
+        yaml_peg::Yaml::Alias(_) => Meta::Null,
     }
 }
 
 fn parse_yaml(input: &str) -> CoreResult<Meta, String> {
     let doc = yaml_peg::parser::parse::<yaml_peg::repr::RcRepr>(input)
         .map_err(|e| format!("YAML parsing error: {:?}", e))?;
-    if !doc.is_empty() {
-        Ok(to_meta(&doc[0]))
+    let Some(node) = doc.first() else {
+        return Err("YAML document is empty".to_string());
+    };
+    let meta = to_meta(node);
+    if matches!(meta, Meta::Mapping(_)) {
+        Ok(meta)
     } else {
-        Err("YAML document is empty".to_string())
+        Err("YAML metadata must be a mapping".to_string())
     }
 }
 

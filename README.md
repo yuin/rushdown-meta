@@ -35,43 +35,50 @@ That's some text with a meta.
 ```rust
 use rushdown::{
     as_kind_data,
-    parser::{self, Parser, ParserExtension },
-    renderer::html,
-    text,
+    ast::Document,
+    parser::{self, ParseOptions, Parser},
+    renderer::{html, RenderOptions},
 };
-use rushdown_meta::{meta_parser_extension, MetaParserOptions};
+use rushdown_meta::{meta_html_renderer_extension, meta_parser_extension, MetaHtmlRendererOptions};
 
 let source = r#"---
 title: YAML Frontmatter
 ---
 aaa
 "#;
-let parser = Parser::with_extensions(
-    parser::Options::default(),
-    meta_parser_extension(MetaParserOptions::default()),
-);
-let renderer = html::Renderer::with_extensions(html::Options::default(), html::NO_EXTENSIONS);
-let mut reader = text::BasicReader::new(source);
-let (arena, document_ref) = parser.parse(&mut reader);
+let parser = Parser::with_extensions(parser::Options::default(), meta_parser_extension());
+let (arena, document_ref) = parser.parse(source, ParseOptions::default());
 let metadata = as_kind_data!(&arena, document_ref, Document).metadata();
 assert_eq!(
     metadata.get("title").unwrap().as_str().unwrap(),
     "YAML Frontmatter"
 );
+let renderer = html::Renderer::with_extensions(
+    html::Options::default(),
+    meta_html_renderer_extension(MetaHtmlRendererOptions::default()),
+);
 let mut output = String::new();
 renderer
-    .render(&mut output, source, &arena, document_ref)
-    .expect("Rendering failed");
+    .render(&mut output, source, &arena, document_ref, RenderOptions::default())
+    .expect("Rendering Failed");
+assert_eq!(output, "<p>aaa</p>\n");
 ```
 
 Metadata is stored in the Document node.
 You can get the metadata from the Document using `metadata()` method.
 
+The `MetaBlock` node is kept in the AST, and it renders nothing by default.
+If YAML parsing fails, the `MetaBlock` renders an HTML comment that describes the error, and no metadata is stored in the Document.
+
 ### Options
+
+`MetaHtmlRendererOptions` is an option of `meta_html_renderer_extension`.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `table`| `bool` | `false` | whether to render the meta as a table |
+| `table` | `Option<MetaTableLayout>` | `None` | whether to render the meta as a table |
+
+`MetaTableLayout` is either `Columns` or `Rows`.
 
 ## Donation
 BTC: 1NEDSyUmo4SMTDP83JJQSWi1MvQUGGNMZB

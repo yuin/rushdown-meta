@@ -1,168 +1,233 @@
 use rushdown::{
     as_kind_data,
-    ast::{Arena, NodeRef},
+    ast::{Arena, KindData, NodeRef},
     new_markdown_to_html_string,
-    parser::{
-        self, AnyAstTransformer, AstTransformer, NoParserOptions, Parser, ParserExtension,
-        ParserExtensionFn,
-    },
+    parser::{self, ParseOptions, Parser},
     renderer::html,
-    test::{MarkdownTestCase, MarkdownTestCaseOptions},
-    text,
 };
-use rushdown_meta::{meta_parser_extension, MetaParserOptions};
+use rushdown_meta::{
+    meta_html_renderer_extension, meta_parser_extension, MetaHtmlRendererOptions, MetaTableLayout,
+};
 
-#[derive(Debug)]
-struct TestMeta;
+const SOURCE: &str = r#"---
+Title: goldmark-meta
+Summary: Add YAML metadata to the document
+Tags:
+    - markdown
+    - goldmark
+---
 
-impl TestMeta {
-    pub fn new() -> Self {
-        Self
-    }
+# Hello goldmark-meta
+"#;
+
+fn parse(source: &str) -> (Arena, NodeRef) {
+    let parser = Parser::with_extensions(parser::Options::default(), meta_parser_extension());
+    parser.parse(source, ParseOptions::default())
 }
 
-impl AstTransformer for TestMeta {
-    fn transform(
-        &self,
-        arena: &mut Arena,
-        doc_ref: NodeRef,
-        _reader: &mut text::BasicReader,
-        __ctx: &mut parser::Context,
-    ) {
-        let meta = as_kind_data!(arena, doc_ref, Document).metadata();
-        assert_eq!(
-            meta.get("title").unwrap().as_str().unwrap(),
-            "YAML Frontmatter"
-        );
-        assert_eq!(meta.get("date").unwrap().as_str().unwrap(), "2026-03-11");
-        assert_eq!(
-            meta.get("tags").unwrap().as_sequence().unwrap()[0]
-                .as_str()
-                .unwrap(),
-            "Rust"
-        );
-        assert_eq!(
-            meta.get("tags").unwrap().as_sequence().unwrap()[1]
-                .as_str()
-                .unwrap(),
-            "Markdown<>"
-        );
-        let author = meta.get("author").unwrap().as_mapping().unwrap();
-        assert_eq!(author.get("name").unwrap().as_str().unwrap(), "yuin");
-    }
-}
-
-impl From<TestMeta> for AnyAstTransformer {
-    fn from(t: TestMeta) -> Self {
-        AnyAstTransformer::Extension(Box::new(t))
-    }
+fn render(source: &str, options: MetaHtmlRendererOptions) -> String {
+    let markdown_to_html = new_markdown_to_html_string(
+        parser::Options::default(),
+        html::Options {
+            allows_unsafe: true,
+            xhtml: false,
+            ..html::Options::default()
+        },
+        meta_parser_extension(),
+        meta_html_renderer_extension(options),
+    );
+    let mut output = String::new();
+    markdown_to_html(&mut output, source).expect("rendering failed");
+    output
 }
 
 #[test]
 fn test_meta() {
-    let source = r#"---
-title: YAML Frontmatter
-date: "2026-03-11"
-tags: ["Rust", "Markdown<>"]
-author:
-  name: yuin
----
-aaa
-"#;
-    let markdown_to_html = new_markdown_to_html_string(
-        parser::Options::default(),
-        html::Options {
-            allows_unsafe: true,
-            xhtml: false,
-            ..html::Options::default()
-        },
-        meta_parser_extension(MetaParserOptions { table: true }).and(ParserExtensionFn::new(
-            |p: &mut Parser| {
-                p.add_ast_transformer(TestMeta::new, NoParserOptions, 0);
-            },
-        )),
-        html::NO_EXTENSIONS,
+    let (arena, doc_ref) = parse(SOURCE);
+    let meta_block_ref = arena[doc_ref].first_child().expect("meta block");
+    assert!(matches!(
+        arena[meta_block_ref].kind_data(),
+        KindData::Extension(_)
+    ));
+    assert_eq!(
+        as_kind_data!(arena, doc_ref, Document)
+            .metadata()
+            .get("Title")
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "goldmark-meta"
     );
-    MarkdownTestCase::new(
-        1,
-        "ok",
-        source,
-        r#"<table>
+    let tags = as_kind_data!(arena, doc_ref, Document)
+        .metadata()
+        .get("Tags")
+        .unwrap()
+        .as_sequence()
+        .unwrap();
+    assert_eq!(tags.len(), 2);
+    assert_eq!(tags[0].as_str().unwrap(), "markdown");
+    assert_eq!(tags[1].as_str().unwrap(), "goldmark");
+    assert_eq!(
+        render(SOURCE, MetaHtmlRendererOptions::default()),
+        "<h1>Hello goldmark-meta</h1>\n"
+    );
+}
+
+#[test]
+fn test_meta_table() {
+    let expected = r#"<table>
 <thead>
 <tr>
-<th>title</th>
-<th>date</th>
-<th>tags</th>
-<th>author</th>
+<th>Title</th>
+<th>Summary</th>
+<th>Tags</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>YAML Frontmatter</td>
-<td>2026-03-11</td>
-<td>[Rust, Markdown&lt;&gt;]</td>
-<td>{name: yuin}</td>
+<td>goldmark-meta</td>
+<td>Add YAML metadata to the document</td>
+<td><ul><li>markdown</li><li>goldmark</li></ul></td>
 </tr>
 </tbody>
 </table>
-<p>aaa</p>
-"#,
-        MarkdownTestCaseOptions::default(),
-    )
-    .execute(&markdown_to_html);
-}
-
-#[test]
-fn test_error() {
-    let source = r#"---
-title: YAML Frontmatter
-hogehoge
----
-aaa
+<h1>Hello goldmark-meta</h1>
 "#;
-    let markdown_to_html = new_markdown_to_html_string(
-        parser::Options::default(),
-        html::Options {
-            allows_unsafe: true,
-            xhtml: false,
-            ..html::Options::default()
-        },
-        meta_parser_extension(MetaParserOptions::default()),
-        html::NO_EXTENSIONS,
-    );
-    MarkdownTestCase::new(
-        1,
-        "ok",
-        source,
-        r#"<!-- Error parsing YAML metadata: YAML parsing error: Terminate { name: "map splitter", msg: "2:9\nhogehoge\n        ^" } -->
-<p>aaa</p>
-"#,
-        MarkdownTestCaseOptions::default(),
-    )
-    .execute(&markdown_to_html);
-}
-
-#[test]
-fn test_ok() {
-    let source = r#"---
-title: YAML Frontmatter
----
-aaa
-"#;
-    let parser = Parser::with_extensions(
-        parser::Options::default(),
-        meta_parser_extension(MetaParserOptions::default()),
-    );
-    let renderer = html::Renderer::with_extensions(html::Options::default(), html::NO_EXTENSIONS);
-    let mut reader = text::BasicReader::new(source);
-    let (arena, document_ref) = parser.parse(&mut reader);
-    let metadata = as_kind_data!(&arena, document_ref, Document).metadata();
     assert_eq!(
-        metadata.get("title").unwrap().as_str().unwrap(),
-        "YAML Frontmatter"
+        render(
+            SOURCE,
+            MetaHtmlRendererOptions::with_table(MetaTableLayout::Columns)
+        ),
+        expected
     );
-    let mut output = String::new();
-    renderer
-        .render(&mut output, source, &arena, document_ref)
-        .expect("Rendering failed");
+}
+
+#[test]
+fn test_meta_table_rows() {
+    let expected = r#"<table>
+<tbody>
+<tr>
+<td>Title</td>
+<td>goldmark-meta</td>
+</tr>
+<tr>
+<td>Summary</td>
+<td>Add YAML metadata to the document</td>
+</tr>
+<tr>
+<td>Tags</td>
+<td><ul><li>markdown</li><li>goldmark</li></ul></td>
+</tr>
+</tbody>
+</table>
+<h1>Hello goldmark-meta</h1>
+"#;
+    assert_eq!(
+        render(
+            SOURCE,
+            MetaHtmlRendererOptions::with_table(MetaTableLayout::Rows)
+        ),
+        expected
+    );
+}
+
+#[test]
+fn test_meta_table_with_blank_line() {
+    let source = r#"---
+Title: goldmark-meta
+Summary: Add YAML metadata to the document
+
+# comments
+Tags:
+    - markdown
+    - goldmark
+---
+
+# Hello goldmark-meta
+"#;
+    let expected = r#"<table>
+<thead>
+<tr>
+<th>Title</th>
+<th>Summary</th>
+<th>Tags</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>goldmark-meta</td>
+<td>Add YAML metadata to the document</td>
+<td><ul><li>markdown</li><li>goldmark</li></ul></td>
+</tr>
+</tbody>
+</table>
+<h1>Hello goldmark-meta</h1>
+"#;
+    assert_eq!(
+        render(
+            source,
+            MetaHtmlRendererOptions::with_table(MetaTableLayout::Columns)
+        ),
+        expected
+    );
+}
+
+#[test]
+fn test_meta_error() {
+    let source = r#"---
+Title: goldmark-meta
+Summary: Add YAML metadata to the document
+Tags:
+  - : {
+  }
+    - markdown
+---
+
+# Hello goldmark-meta
+"#;
+    let (arena, doc_ref) = parse(source);
+    assert!(as_kind_data!(arena, doc_ref, Document)
+        .metadata()
+        .get("Title")
+        .is_none());
+    let output = render(
+        source,
+        MetaHtmlRendererOptions::with_table(MetaTableLayout::Columns),
+    );
+    assert!(output.starts_with("<!-- YAML parsing error: "), "{output}");
+    assert!(
+        output.ends_with(" -->\n<h1>Hello goldmark-meta</h1>\n"),
+        "{output}"
+    );
+}
+
+#[test]
+fn test_meta_is_not_a_mapping() {
+    let source = r#"---
+- markdown
+- goldmark
+---
+aaa
+"#;
+    let (arena, doc_ref) = parse(source);
+    assert_eq!(as_kind_data!(arena, doc_ref, Document).metadata().len(), 0);
+    assert_eq!(
+        render(source, MetaHtmlRendererOptions::default()),
+        "<!-- YAML metadata must be a mapping -->\n<p>aaa</p>\n"
+    );
+}
+
+#[test]
+fn test_meta_only_at_first_line() {
+    let source = r#"aaa
+---
+title: rushdown-meta
+---
+"#;
+    let (arena, doc_ref) = parse(source);
+    assert_eq!(as_kind_data!(arena, doc_ref, Document).metadata().len(), 0);
+    assert_eq!(
+        render(source, MetaHtmlRendererOptions::default()),
+        "<h2>aaa</h2>\n<h2>title: rushdown-meta</h2>\n"
+    );
 }
